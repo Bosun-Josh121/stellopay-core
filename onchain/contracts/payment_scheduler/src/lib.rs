@@ -40,6 +40,7 @@ enum StorageKey {
     Owner,
     NextJobId,
     Job(u128),
+    JobConflict(Address, Address, u64),
 }
 
 #[contracttype]
@@ -131,14 +132,14 @@ impl PaymentSchedulerContract {
             .set(&StorageKey::Initialized, &true);
     }
 
-    /// @notice Creates a new recurring payment job.
+    /// @notice Creates a new recurring or one-time payment job.
     /// @dev Employer optionally pre-funds the contract; jobs are executed
     ///      by calling `process_due_payments`.
     /// @param employer Employer funding the job; must authenticate.
     /// @param recipient Payment recipient.
     /// @param token Token contract used for payments.
     /// @param amount Amount per execution.
-    /// @param interval_seconds Time between executions.
+    /// @param interval_seconds Time between executions (can be 0 for one-time payments).
     /// @param start_time First execution timestamp.
     /// @param max_executions Optional maximum number of executions (None = unlimited).
     /// @param max_retries Maximum retry attempts for insufficient funds.
@@ -157,13 +158,24 @@ impl PaymentSchedulerContract {
         employer.require_auth();
 
         assert!(amount > 0, "Amount must be positive");
-        assert!(interval_seconds > 0, "Interval must be positive");
+        
+        // SUPPORT ONE-TIME PAYMENTS: Allow 0 interval only if max_executions is 1
+        if max_executions != Some(1) {
+            assert!(interval_seconds > 0, "Interval must be positive for recurring jobs");
+        }
+
+        // CONFLICT DETECTION: Prevent identical jobs for the same recipient at the exact same start time
+        let conflict_key = StorageKey::JobConflict(employer.clone(), recipient.clone(), start_time);
+        assert!(
+            !env.storage().persistent().has(&conflict_key),
+            "Conflict: identical job scheduled for this time"
+        );
 
         let id = next_job_id(&env);
         let job = PaymentJob {
             id,
             employer: employer.clone(),
-            recipient,
+            recipient: recipient.clone(),
             token,
             amount,
             interval_seconds,
@@ -175,6 +187,9 @@ impl PaymentSchedulerContract {
             status: JobStatus::Active,
         };
         write_job(&env, &job);
+
+        // Record the conflict footprint to prevent duplicates
+        env.storage().persistent().set(&conflict_key, &id);
 
         env.events().publish(
             ("job_created", id),

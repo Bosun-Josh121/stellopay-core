@@ -211,3 +211,78 @@ fn pause_and_resume_job() {
     assert_eq!(token.balance(&recipient), 100i128);
 }
 
+#[test]
+fn test_one_time_payment() {
+    let env = create_env();
+    let (scheduler_id, client) = register_contract(&env);
+    let owner = Address::generate(&env);
+    client.initialize(&owner);
+
+    let employer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token_contract(&env, &token_admin);
+    let asset_admin = StellarAssetClient::new(&env, &token.address);
+
+    asset_admin.mint(&employer, &100i128);
+    token.transfer(&employer, &scheduler_id, &100i128);
+
+    env.ledger().with_mut(|li| li.timestamp = 0);
+
+    // Create a strict ONE-TIME job (interval = 0, max_executions = Some(1))
+    let job_id = client.create_job(
+        &employer,
+        &recipient,
+        &token.address,
+        &100i128,
+        &0u64, // 0 interval allowed for one-time
+        &0u64,
+        &Some(1u32),
+        &1u32,
+    );
+
+    let processed = client.process_due_payments(&10u32);
+    assert_eq!(processed, 1);
+
+    let job = client.get_job(&job_id).unwrap();
+    assert_eq!(job.executions, 1);
+    assert_eq!(job.status, JobStatus::Completed);
+    assert_eq!(token.balance(&recipient), 100i128);
+}
+
+#[test]
+#[should_panic(expected = "Conflict: identical job scheduled for this time")]
+fn test_conflict_detection_prevents_duplicates() {
+    let env = create_env();
+    let (_, client) = register_contract(&env);
+    let owner = Address::generate(&env);
+    client.initialize(&owner);
+
+    let employer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    // Create first job
+    client.create_job(
+        &employer,
+        &recipient,
+        &token,
+        &100i128,
+        &10u64,
+        &1000u64, // Start time
+        &Some(3u32),
+        &1u32,
+    );
+
+    // Attempting to create the exact same job at the same time should panic
+    client.create_job(
+        &employer,
+        &recipient,
+        &token,
+        &100i128,
+        &10u64,
+        &1000u64, // Exact same start time triggers conflict
+        &Some(3u32),
+        &1u32,
+    );
+}
